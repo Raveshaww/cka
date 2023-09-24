@@ -1,0 +1,353 @@
+# CKA Notes
+These are my notes from before I took the CKA exam. These were mostly taken from a combination of following along KodeKloud's course on the subject, as well as my own personal experiences. Please note that I took this exam after taking the CKAD, so concepts more heavily covered in that exam probably don't have much in the way of notes here.
+### Core Concepts
+- ETCD in k8s
+    - when manually setting up ETCD for a cluster, you need to set certs and etc
+    - You also need to set the `advertise-client-urls` to set the address on which ETCD listens
+    - default port is `2379`
+    - ETCD knows about each other with the `initial-cluster` option
+- ETCD Commands
+    - by default, `etcdctl` uses version 2 of the API
+    - This can be used to interact with ETCD to take backups and things of that nature
+- Kube API Server
+    - You technically can just send an API request rather than strictly using `kubectl`
+- Kube Controller Manager
+    - These monitor the status of the cluster and takes actions to remediate as needed
+    - node controller
+        - By default, it checks every 5 seconds with a 40 second grace period
+        - If a node isn't reachable in 5 minutes, it removes the pods from that node and reschedules
+    - these are packaged into the `kube-controller-manager`
+        - by default, all controllers are enabled in the `controllers` setting 
+- Kube Scheduler
+    - Decides which pod goes where, but doesn't actively place it
+    - it does this in two phases
+        - it filters out the pod that don't fit the required resources
+        - it then selects one by ranking the remaining nodes
+- Kubelet
+    - This is basically just the service that runs on worker nodes
+    - Kubeadm doesn't actually deploy the kubelets
+- Kube Proxy
+    - services work via the kube proxy process
+### Scheduling
+- Manual Scheduling
+    - If you don't have a scheduler, you can manually schedule pods by setting the `nodeName` field
+    - If the pod is already created, you can create a `Binding` object and then send a `POST` request
+- DaemonSets
+    - Useful for monitoring agents, log collectors, kube-proxy and other networking solution
+- Static Pods
+    - This is a kubelet-managed node, managed independently of the controlplane nodes
+    - Since there is no API server present, you supply the pod definition files in a specific directory
+        - `/etc/kubernetes/manifests`
+        - If a file is removed from this directory, it is deleted automatically
+    - Can be changed via the `--pod-manifest-path` option or in the `kubeconfig` file
+    - Pods created this will will create a read-only mirror of the pod for the purposes of viewing with `kubectl`
+- Multiple Schedulers
+    - When creating a pod, k8s will be scheduled by a specific scheduler
+    - This is set by `kubeSchedulerConfiguration` yaml file
+    - then set the `--config` to point to the yaml on the `.service` for the scheduler, or use kubeadm
+    - you can also set the `leaderElection` option to control which copy of the scheduler is being used, like when you have multiple controlplane nodes
+        - only one can be active at a time
+    - You can configure a pod / deployment to use a specific scheduler with `schedulerName`
+    - `kubectl get events -o wide` can help you figure out what scheduled what pod
+- Configuring Scheduler Profiles
+    - when pods are created, they end up in a scheduling queue
+        - sorted by priority set on pod, via a `PriorityClass` k8s object
+    - next is filtering
+    - next is scoring for the nodes 
+    - finally is binding, where the pod is bound to the node
+    - The above are achieved with plugins for schedulers
+    - You can have multiple profiles within a single scheduler to avoid things like race conditions between multiple schedulers
+        - kind of like threads, I guess?
+    - In each profile, you can set the desired plugins with the `plugins` field
+### Logging & Monitoring
+- Monitor Cluster Components
+    - k8s does not come with a full featured monitoring solution
+    - `Heapster` but slimmed down = `metrics server`
+    - kubelets contains a subcomponent called `cadvisor` that retrieves performance metrics and exposing them to the kube-api
+### Cluster Maintenance
+- OS Upgrades
+    - the `pod eviction timeout` is set on the pod controller manager
+    - `kubectl drain` to drain a node, and `cordon` the node
+        - you may need to use `--ignore-daemonsets`
+- Cluster Upgrade
+    - Various components can be at different release versions, but the `kube-apiserver` needs to be the highest version
+        - examples:
+            - by up to one version
+                - `controller-manager`
+                - `kube-scheduler`
+            - by up to two versions
+                - `kubelet`
+             - `kube-proxy`
+    - `kubectl` can be a version ahead or a version behind
+    - k8s only supports up to three minor versions at a time
+    - `kubeadm` can help you plan and upgrade k8s
+    - to upgrade controlpane:
+        - upgrade kubeadm
+            - `apt install kubelet=1.27.0-00`
+        - `kubeadm upgrade plan`
+        - `kubeadm upgrade apply v.1.27.0`
+        - `update kublet`
+            - `apt-get install kubelet=1.27.0-00 `
+        - `systemctl daemon-reload`
+        - `systemctl restart kubelet.service`
+    - to upgrade kubelet:
+        - drain node
+        - upgrade kubeadm and kubelet packages
+        - `kubeadm upgrade node`
+        - uncordon
+- Backup and Restore Methods
+    - You should consider backing these up:
+        - resource config
+            - save all the yaml!
+        - etcd cluster
+            - etcd has a `--data-dir` option, and you can back that directory up
+            - etcd also comes with a built-in snapshot solution
+                - If you go to restore a snapshot, you should shutdown the kube-apiserver
+                - You basically restore to a new data dir and point etcd to that new data dir
+        - persistent volumes
+- Working with ETCDCTL
+    - You'll need to set `ETCDCTL_API` to `3`
+        - `export ETCDCTL_API=3`
+    - Since you need to use TLS, the following options are mandatory:
+        - `cacert`
+        - `cert`
+        - `endpoints`
+            - the default is `127.0.0.1:2379`
+        - `key`
+    - example:
+        - `etcdctl snapshot save /opt/snapshot-pre-boot.db --cacert /etc/kubernetes/pki/etcd/ca.crt --key /etc/kubernetes/pki/etcd/server.key --endpoints 127.0.0.1:2379 --cert /etc/kubernetes/pki/etcd/server.crt `
+        - `ETCDCTL_API=3 etcdctl  --data-dir /var/lib/etcd-from-backup snapshot restore /opt/snapshot-pre-boot.db`
+    - updating the ETCD to use a new data dir ensures that it's using the restored snapshot
+    - This all can take some time to actually apply, so be patient
+### Security
+- tls basics
+    - pub keys are usually named:
+        - `*.crt`
+        - `*.pem`
+    - private keys:
+        - `*.key`
+        - `*-key.pem`
+- tls in k8s
+    - server certs:
+      - kube-apiserver 
+      - etcd server
+      - kubelet servers
+  - client certs
+      - admin users
+      - kube scheduler
+      - kube-controller-manager
+      - kube-proxy
+  - You need at least one CA for your cluster
+- cert creation
+    - you can use openssl to create certs
+        - create private key with `openssl genrsa -out ca.key 2048`
+        - create certificate signing request `openssl req -new-key ca.key -subj "/CN=KUBERNETES-CA" -out ca.csr`
+        - sign with `openssl x509 -req -in ca.csr -signkey ca.key -out ca.crt`
+    - client cert creation:
+        - create `openssl genrsa -out admin.key 2048`
+        - csr: `openssl req -new -key admin.key -subj \ "CN=kube-admin,/O=system:masters" -out admin.csr`
+        - signing: `openssl x509 -req -in admin.csr -CA ca.cert -CAkey ca.key -out admin.crt`
+    - system components must be prefixed with `system` like `system:scheduler` or `system:node:node03`
+    - kube-config.yaml can hold all of the info required for certs to use
+- view cert details
+    - `openssl x509 -in /etc/kubernetes/pki/apiserver.crt -text -noout`
+- cert api
+    - This can handle signing requests rather than making someone do it themselves
+    - This also enables a review process for signing requests
+    - user first creates key and generates a cert signing request
+        - `openssl -out jane.key 2048`
+        - `openssl req -new -key jane.key -sub "/CN=jane" -out jane.csr`
+    - sends key to admin
+    - crates `CertificateSigningRequest` object in yaml
+        - the request is base64 encoded
+    - All of this is carried out by the `Controller Manager`
+    - to approve a CSR:
+        - `kubectl certificate approve akshay`
+- kubeconfig
+    - KubeConfig files are needed for auth things, like curl requests
+    - Using these will let you connect to multiple different clusters and contexts easily
+    - by default, it will grab the file located at `~/.kube/config`
+    - Contexts marry user accounts to clusters. Think of it kind of like a vscode workspace
+    - You can manually change context with the following:
+        - `kubectl config use-context prod-user@production`
+    - You can also use this to set default namespaces for each context
+- image security
+    - you can specify `imagePullSecrets` to pass along a secret with the login creds for the private container repo
+    - The secret needs to be configured with type `docker registry`
+### Storage
+- Storage in Docker
+    - When you install docker on a system, it creates a folder at `/var/lib/docker`
+    - storage drivers are what control all of the storage actions taken by the container
+    - Docker will pick what's best out of what is available automatically
+- Volume Driver Plugins in Docker
+    - volumes are not handled by storage drivers, and are instead handled by `volume drivers`
+    - default driver is `local`
+    - These are how you support things like `azure file storage`
+- Container Storage Interface
+    - This makes it easier to bring in container runtimes that aren't docker
+    - This is not specifically k8s related, and is a universal standard
+- Storage Class
+    - This can provision a volume dynamically in things like Google storage
+    - This then takes the place of the `persistentVolume` and is specified in the `claim` yaml
+### Networking
+- Prereq: CoreDNS
+    - basically just another DNS server that you can use
+- Prereq: Network Namespaces
+    - basically the same idea as the namespace used for the processes in a container, but for networking
+    - each container has its own "interface" including routing and arp tables
+    - You can create namespaces with 
+        - `ip nets add red`
+    - You can run an ip command in a namespace like this:
+        - `ip -n red link`
+    - You can create a virtual cable, or pipe, to connect namespaces
+        - `ip link add veth-red type veth peer name veth-blue`
+        - `ip link set veth-red netns red`
+        - `ip link set veth-blue netns blue`
+        - `ip -n red addr add 192.168.1.1 dev veth-red`
+    - You can create a virtual switch with:
+        - linux bridge
+            - add new interface with:
+                - `ip link add v-net-0 type bridge`
+                - shows as another interface on the host
+        - open vSwitch
+- Prereq: Docker Networking
+    - networks:
+        - `none`
+            - no comms with the outside world
+        - `host`
+            - available on the host, by default on port 80
+        - `bridge`
+            - internal private network, host and containers attach to
+            - called `bridge` via `docker ls`, but the interface on the host is `docker0`
+        - When a container is created, Docker creates a network namespace for it
+- Prereq: CNI
+    - Ironically, Docker does not implement CNI and instead implements `Container Network Model (CNM)`
+- Pod Networking
+    - as of today, k8s does not solve this out of the box
+- CNI in k8s
+    - must be invoked by the kubelet service
+    - plugins are stored in `/op/cni/bin`
+    - you can see what is configured to be used at `/etc/cni/net.d`
+- CNI Weave
+    - deploys an 'agent' on each node, which stores the topology of the entire setup
+    - this then creates its own bridges and assigns IPs as needed
+    - deploy with this:
+        - `kubectl apply -f https://github.com/weaveworks/weave/releases/download/v2.8.1/weave-daemonset-k8s.yaml`
+- IPAM weave
+    - IPAM = ip address management
+    - CNI plugins must take care of applying IP to containers
+    - `host-local` seems to be installed by default
+- Service Networking
+    - You rarely configure pods to communicate directly with another pod
+    - services get IP addresses from a predefined range, and is handed out by kube-proxy
+    - kube-proxy creates forwarding rules for IP and Ports using either `userspace`, `ipvs`, or the default `iptables`
+    - pods and services should be on different ip ranges
+- DNS in k8s
+    - if in same namespace, you could reach a service by just its name:
+        - i.e. `web-service`
+    - if in the apps namespace (not the one you're in)
+        - `webservice.apps`
+    - all services are grouped into a subdomain called `svc`
+        - `webservices.apps.svc`
+    - all services and pods are grouped into a root domain
+        - `webservices.apps.svc.cluster.local`
+    - dns records for pods are not created by default
+        - it doesn't use the pod name, but generates a name by replacing the `.` in the IP address with `-`
+        - `10.2.234.1.apps.svc.cluster.local`
+- CoreDNS in k8s
+    - recommended DNS server for k8s is `coreDNS`
+    - deployed as two pods for redundancy
+    - settings in `/etc/coredns/Corefile`
+    - This is passed into the pod as a configmap
+### Design and Install a k8s Cluster
+- Design a cluster
+    - up to 5,000 nodes
+    - up to 150,000 pods
+    - up to 300,000 containers
+    - up to 100 pods per node
+- Choosing k8s infrastructure
+    - minikube deploys vms and allows for single node clusters
+    - kubeadm requires VMs to be ready
+- Configure HA
+    - API server
+        - can be active/active
+    - Scheduler and Controller Manager
+        - active/standby
+        - leader election process determines who's active
+            - whichever process updates the endpoint first is the leader
+- ETCD in HA
+    - only one instance can process writes at a time
+    - a leader is elected internally
+    - if a write comes in through a different node, the leader still processes the write and then sends a copy of the data to the other nodes
+    - a write is considered complete when it is written to a majority of the nodes in the cluster
+    - leaders are selected via `RAFT`
+### Install k8s the Kubeadm way
+- Deploy with Kubeadm
+    - steps:
+        - provision systems / vms
+        - install container runtime (containerd in these examples)
+        - install kubeadm
+        - initialize controlplane server
+        - ensure that network prereqs are met
+            - pod network
+        - worker nodes join controlplane
+    - use apt to install containerd
+        - don't forget the bit about forwarding ipv4 and letting iptables see bridged traffic
+        - basically docker instructions
+        - `sudo apt install containerd.io`
+    - `systemctl status containerd`
+    - configure Cgroup driver
+        - both the kubelet and container runtime need to run with the same cgroup driver
+        - to set to systemd:
+            - set `/etc/containerd/config.toml`
+                - delete all default configs
+                - copy text from k8s docs to this file
+                - delete line with three dots
+            - `sudo systemctl restart containerd`
+    - install `kubeadm`, `kubectl`, and `kubelet`
+    - create a cluster
+        - control plane:
+            - choose pod network addon
+            - `sudo kubeadm init --pod-network-cidr=10.244.0.0/16  --apiserver-advertise-address=192.168.56.2`
+            - run the generated commands
+            - setup pod network
+                - make sure to read the docs for any "gotcha's"
+    - join to cluster
+        - worker nodes
+            - run the generated commands from `kubeadm init` 
+### Troubleshooting
+- Control Plane Failure
+    - services are your first guess, basically
+    - look at manifest files, too. 
+- Worker Node Failure
+    - `journalctl -u kubelet -f`
+    - config files can be found in `/var/lib/kubelet` as well as `/etc/kubernetes`
+### JSON Path
+- JSON Path
+    - `[]` is a list, like a `-` in yaml
+    - `{}` is a dict, like when indented in yaml
+    - root element is `$`
+        - i.e. `$.car.color`
+    - results are encapsulated in an array, `[]`, regardless of input
+    - you can do some equations in the middle of `[]` in the jsonpath query
+        - `@` is the item in the query
+        - `$[?(@ > 40)]`
+        - i.e.
+            - `$.prizes[?(@.year == 2014)].laureates[*].firstname`
+    - if trying to get to something nested in a list, do `[].[]`
+    - you can select multiple elements like `[0,3]`
+- JSON path wild cards
+    - get all prices with `$.*.price` when in a dict
+    - in a list, `$[*].model` means all items
+- json path lists
+    - to list in a range use `$[0:8]`, doesn't include the end
+        - step option can be added after a second `:`
+- k8s jsonpath
+    - you can just use `-json` to get an idea of how to form your jsonpath query
+    - You can have multiple secions like this
+        - `{.items[*].metadata.name}{"\n"}{.items[*].status.capacity.cpu}`
+    - You can loop with
+        - `{range .items[*]}{.metadata.name} {"\t"}{.status.capacity.cpu}{"\n"}{end}`
+    - You can make custom columns like this:
+        - `k get nodes -o=custom-columns=<COLUMN NAME>:<JSON PATH>`
+    - you can sort with `--sort-by`
